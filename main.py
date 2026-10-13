@@ -2,7 +2,7 @@ import os
 import tkinter as tk
 import sv_ttk
 from tkinter import ttk, filedialog, messagebox
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -25,6 +25,10 @@ class TokenItem:
 class ParseNode:
     name: str
     children: list
+    line: int = 0
+    col: int = 0
+    kind: str = ""
+    attrs: dict = field(default_factory=dict)
 
 class Parser:
 
@@ -45,20 +49,21 @@ class Parser:
 
     def match(self, lexeme=None, kind=None):
         tok = self.current()
+        prefix = self._pos(tok)
 
         if tok is None:
-            self.errors.append("Fin inesperado de archivo")
+            self.errors.append(prefix + "Fin inesperado de archivo")
             return None
 
         if lexeme is not None and tok.lexeme != lexeme:
             self.errors.append(
-                f"Se esperaba '{lexeme}' y se encontró '{tok.lexeme}'"
+                prefix + f"Se esperaba '{lexeme}' y se encontró '{tok.lexeme}'"
             )
             return None
 
         if kind is not None and tok.kind != kind:
             self.errors.append(
-                f"Se esperaba {kind} y se encontró {tok.kind}"
+                prefix + f"Se esperaba {kind} y se encontró {tok.kind}"
             )
             return None
 
@@ -71,17 +76,17 @@ class Parser:
         if self.current() is not None:
             tok = self.current()
             self.errors.append(
-                f"Token inesperado al final: '{tok.lexeme}'"
+                self._pos(tok) + f"Token inesperado al final: '{tok.lexeme}'"
             )
 
         return tree, self.errors
 
     # programa → main { lista_declaracion }
     def programa(self):
-        self.match("main")
+        tok_main = self.match("main")
         self.match("{")
 
-        node = ParseNode("main", [])
+        node = self.node("main", [], tok_main)
         node.children.append(self.lista_declaracion())
 
         self.match("}")
@@ -102,7 +107,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en declaración")
+            self.errors.append(self._pos() + "Fin inesperado en declaración")
             return ParseNode("ERROR", [])
 
         if tok.lexeme in ("int", "float", "bool"):
@@ -114,7 +119,7 @@ class Parser:
         ):
             return self.sentencia()
 
-        self.errors.append(f"Declaración inválida: '{tok.lexeme}'")
+        self.errors.append(self._pos(tok) + f"Declaración inválida: '{tok.lexeme}'")
         self.advance()
         return ParseNode("ERROR", [])
 
@@ -125,7 +130,7 @@ class Parser:
 
         self.match(";")
 
-        return ParseNode("decl", [tipo_node, ids_node])
+        return self.node("decl", [tipo_node, ids_node], tipo_node, "DECLARACION")
 
     # identificador → id | identificador , id
     def identificador(self):
@@ -133,19 +138,19 @@ class Parser:
 
         ident = self.match(kind="IDENTIFICADOR")
         if ident:
-            ids.append(ParseNode(ident.lexeme, []))
+            ids.append(self.leaf(ident))
 
         while self.current() and self.current().lexeme == ",":
             self.match(",")
 
             ident = self.match(kind="IDENTIFICADOR")
             if ident:
-                ids.append(ParseNode(ident.lexeme, []))
+                ids.append(self.leaf(ident))
 
         if len(ids) == 1:
             return ids[0]
 
-        return ParseNode("ids", ids)
+        return ParseNode("ids", ids, ids[0].line, ids[0].col)
 
     # tipo → int | float | bool
     def tipo(self):
@@ -153,10 +158,10 @@ class Parser:
 
         if tok and tok.lexeme in ("int", "float", "bool"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         self.errors.append(
-            f"Tipo inválido: '{tok.lexeme if tok else 'EOF'}'"
+            self._pos(tok) + f"Tipo inválido: '{tok.lexeme if tok else 'EOF'}'"
         )
         return ParseNode("ERROR", [])
 
@@ -165,7 +170,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en sentencia")
+            self.errors.append(self._pos() + "Fin inesperado en sentencia")
             return ParseNode("ERROR", [])
 
         match tok.lexeme:
@@ -196,7 +201,7 @@ class Parser:
 
                     return self.asignacion()
 
-                self.errors.append(f"Sentencia inválida: '{tok.lexeme}'")
+                self.errors.append(self._pos(tok) + f"Sentencia inválida: '{tok.lexeme}'")
                 self.advance()
                 return ParseNode("ERROR", [])
 
@@ -213,7 +218,7 @@ class Parser:
             ):
                 node.children.append(self.sentencia())
             else:
-                self.errors.append(f"Sentencia inválida: '{tok.lexeme}'")
+                self.errors.append(self._pos(tok) + f"Sentencia inválida: '{tok.lexeme}'")
                 self.advance()
 
         return node
@@ -227,30 +232,37 @@ class Parser:
 
         return node
 
+    # Cuerpo de if/else: lista_sentencias hasta la palabra clave, o { ... } (llaves opcionales)
+    def cuerpo(self, stop_words):
+        if self.current() and self.current().lexeme == "{":
+            return self.bloque_llaves()
+
+        return self.lista_sentencias(stop_words=stop_words)
+
     # asignacion → id = sent_expresion
     def asignacion(self):
         ident = self.match(kind="IDENTIFICADOR")
 
-        left = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        left = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         self.match("=")
 
         right = self.sent_expresion()
 
-        return ParseNode("=", [left, right])
+        return self.node("=", [left, right], ident, "ASIGNACION")
 
     # id++ ; / id-- ;
     def incremento(self):
         ident = self.match(kind="IDENTIFICADOR")
-        left = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        left = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         op = self.current()
 
         if op and op.lexeme in ("++", "--"):
             self.advance()
-            op_node = ParseNode(op.lexeme, [left])
+            op_node = self.node(op.lexeme, [left], op, "OPERADOR")
         else:
-            self.errors.append("Se esperaba '++' o '--'")
+            self.errors.append(self._pos() + "Se esperaba '++' o '--'")
             op_node = ParseNode("ERROR", [left])
 
         self.match(";")
@@ -271,69 +283,100 @@ class Parser:
 
     # seleccion → if expresion then lista_sentencias [ else lista_sentencias ] end
     def seleccion(self):
-        self.match("if")
+        tok_if = self.match("if")
 
         condicion = self.expresion()
 
         self.match("then")
 
-        entonces = self.bloque_llaves()
+        entonces = self.cuerpo(("else", "end"))
 
         children = [condicion, entonces]
 
         if self.current() and self.current().lexeme == "else":
             self.match("else")
-            sino = self.bloque_llaves()
+            sino = self.cuerpo(("end",))
             children.append(sino)
 
         self.match("end")
 
-        return ParseNode("if", children)
+        return self.node("if", children, tok_if, "SENTENCIA")
 
     # iteracion → while expresion lista_sentencias end
     def iteracion(self):
-        self.match("while")
+        tok_while = self.match("while")
 
         condicion = self.expresion()
 
-        cuerpo = self.bloque_llaves()
+        if self.current() and self.current().lexeme == "{":
+            cuerpo = self.bloque_llaves()
+        else:
+            cuerpo = self.lista_sentencias(stop_words=("end",))
+            self.match("end")
 
-        return ParseNode("while", [condicion, cuerpo])
+        return self.node("while", [condicion, cuerpo], tok_while, "SENTENCIA")
 
     # repeticion → do lista_sentencias while expresion
     def repeticion(self):
-        self.match("do")
+        tok_do = self.match("do")
 
-        cuerpo = self.bloque_llaves()
-
-        self.match("while")
-
-        condicion = self.expresion()
-
-        return ParseNode("do-while", [cuerpo, condicion])
+        # Verificar si el cuerpo empieza con llave
+        if self.current() and self.current().lexeme == "{":
+            cuerpo = self.bloque_llaves()
+            
+            # Verificar si sigue "while" o "until"
+            if self.current() and self.current().lexeme in ("while", "until"):
+                tok_keyword = self.current()
+                self.advance()
+                
+                condicion = self.expresion()
+                
+                if tok_keyword.lexeme == "while":
+                    return self.node("do-while", [cuerpo, condicion], tok_do, "SENTENCIA")
+                else:  # until
+                    return self.node("do-until", [cuerpo, condicion], tok_do, "SENTENCIA")
+            else:
+                self.errors.append(self._pos() + "Se esperaba 'while' o 'until'")
+                return ParseNode("ERROR", [])
+        else:
+            cuerpo = self.lista_sentencias(stop_words=("until",))
+            
+            # Verificar que haya "until"
+            if self.current() and self.current().lexeme == "until":
+                tok_until = self.match("until")
+                condicion = self.expresion()
+                return self.node("do-until", [cuerpo, condicion], tok_do, "SENTENCIA")
+            else:
+                # Si no hay until, verificar si es while
+                if self.current() and self.current().lexeme == "while":
+                    self.errors.append(self._pos() + "Se esperaba 'until' después de 'do'")
+                    return ParseNode("ERROR", [])
+                else:
+                    self.errors.append(self._pos() + "Se esperaba 'until' o 'while' después de 'do'")
+                    return ParseNode("ERROR", [])
 
     # sent_in → cin >> id ;
     def sent_in(self):
-        self.match("cin")
+        tok_cin = self.match("cin")
         self.match(">>")
 
         ident = self.match(kind="IDENTIFICADOR")
-        var_node = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        var_node = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         self.match(";")
 
-        return ParseNode("cin", [var_node])
+        return self.node("cin", [var_node], tok_cin, "SENTENCIA")
 
     # sent_out → cout << salida ;
     def sent_out(self):
-        self.match("cout")
+        tok_cout = self.match("cout")
         self.match("<<")
 
         salida_node = self.salida()
 
         self.match(";")
 
-        return ParseNode("cout", [salida_node])
+        return self.node("cout", [salida_node], tok_cout, "SENTENCIA")
 
     # salida → cadena | expresion | cadena << expresion | expresion << cadena
     def salida(self):
@@ -341,23 +384,23 @@ class Parser:
             left = self.cadena()
 
             if self.current() and self.current().lexeme == "<<":
-                self.match("<<")
+                tok_out = self.match("<<")
                 right = self.expresion()
-                return ParseNode("<<", [left, right])
+                return self.node("<<", [left, right], tok_out, "OPERADOR")
 
             return left
 
         left = self.expresion()
 
         if self.current() and self.current().lexeme == "<<":
-            self.match("<<")
+            tok_out = self.match("<<")
 
             if self.current() and self.current().kind == "CADENA":
                 right = self.cadena()
-                return ParseNode("<<", [left, right])
+                return self.node("<<", [left, right], tok_out, "OPERADOR")
 
-            self.errors.append("Se esperaba una cadena después de '<<'")
-            return ParseNode("<<", [left, ParseNode("ERROR", [])])
+            self.errors.append(self._pos() + "Se esperaba una cadena después de '<<'")
+            return self.node("<<", [left, ParseNode("ERROR", [])], tok_out, "OPERADOR")
 
         return left
 
@@ -366,7 +409,7 @@ class Parser:
         tok = self.match(kind="CADENA")
 
         if tok:
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         return ParseNode("ERROR", [])
 
@@ -386,10 +429,7 @@ class Parser:
 
             right = self.expresion_relacional()
 
-            left = ParseNode(
-                op.lexeme,
-                [left, right]
-            )
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
     
@@ -407,10 +447,7 @@ class Parser:
 
             right = self.expresion_simple()
 
-            return ParseNode(
-                op.lexeme,
-                [left, right]
-            )
+            return self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -424,7 +461,7 @@ class Parser:
 
             right = self.termino()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -438,7 +475,7 @@ class Parser:
 
             right = self.factor()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -452,7 +489,7 @@ class Parser:
 
             right = self.componente()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -461,7 +498,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en componente")
+            self.errors.append(self._pos() + "Fin inesperado en componente")
             return ParseNode("ERROR", [])
 
         if tok.lexeme == "(":
@@ -472,29 +509,47 @@ class Parser:
 
         if tok.kind in ("ENTERO", "REAL"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.kind == "IDENTIFICADOR":
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.lexeme in ("true", "false"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.kind == "OP_LOGICO":
             op = self.current()
             self.advance()
 
-            return ParseNode(op.lexeme, [self.componente()])
+            return self.node(op.lexeme, [self.componente()], op, "OPERADOR")
 
-        self.errors.append(f"Componente inválido: '{tok.lexeme}'")
+        self.errors.append(self._pos(tok) + f"Componente inválido: '{tok.lexeme}'")
         self.advance()
         return ParseNode("ERROR", [])
     
     def optional_semicolon(self):
         if self.current() and self.current().lexeme == ";":
             self.match(";")
+
+    def node(self, name, children, tok, kind=""):
+        if tok is None:
+            return ParseNode(name, children, 0, 0, kind)
+        return ParseNode(name, children, tok.line, tok.col, kind)
+
+    def leaf(self, tok):
+        return self.node(tok.lexeme, [], tok, tok.kind)
+
+    def _pos(self, tok=None):
+        if tok is None:
+            tok = self.current()
+        if tok is None:
+            if len(self.tokens) > 0:
+                return f"Línea {self.tokens[-1].line}, Col {self.tokens[-1].col}: "
+            return ""
+        return f"Línea {tok.line}, Col {tok.col}: "
+
 
 class IDE(tk.Tk):
     RESERVED = {
