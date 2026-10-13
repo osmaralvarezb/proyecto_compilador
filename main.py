@@ -1,8 +1,11 @@
+import copy
+import operator
 import os
+import re
 import tkinter as tk
 import sv_ttk
 from tkinter import ttk, filedialog, messagebox
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -25,6 +28,10 @@ class TokenItem:
 class ParseNode:
     name: str
     children: list
+    line: int = 0
+    col: int = 0
+    kind: str = ""
+    attrs: dict = field(default_factory=dict)
 
 class Parser:
 
@@ -45,20 +52,21 @@ class Parser:
 
     def match(self, lexeme=None, kind=None):
         tok = self.current()
+        prefix = self._pos(tok)
 
         if tok is None:
-            self.errors.append("Fin inesperado de archivo")
+            self.errors.append(prefix + "Fin inesperado de archivo")
             return None
 
         if lexeme is not None and tok.lexeme != lexeme:
             self.errors.append(
-                f"Se esperaba '{lexeme}' y se encontró '{tok.lexeme}'"
+                prefix + f"Se esperaba '{lexeme}' y se encontró '{tok.lexeme}'"
             )
             return None
 
         if kind is not None and tok.kind != kind:
             self.errors.append(
-                f"Se esperaba {kind} y se encontró {tok.kind}"
+                prefix + f"Se esperaba {kind} y se encontró {tok.kind}"
             )
             return None
 
@@ -71,17 +79,17 @@ class Parser:
         if self.current() is not None:
             tok = self.current()
             self.errors.append(
-                f"Token inesperado al final: '{tok.lexeme}'"
+                self._pos(tok) + f"Token inesperado al final: '{tok.lexeme}'"
             )
 
         return tree, self.errors
 
     # programa → main { lista_declaracion }
     def programa(self):
-        self.match("main")
+        tok_main = self.match("main")
         self.match("{")
 
-        node = ParseNode("main", [])
+        node = self.node("main", [], tok_main)
         node.children.append(self.lista_declaracion())
 
         self.match("}")
@@ -102,7 +110,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en declaración")
+            self.errors.append(self._pos() + "Fin inesperado en declaración")
             return ParseNode("ERROR", [])
 
         if tok.lexeme in ("int", "float", "bool"):
@@ -114,7 +122,7 @@ class Parser:
         ):
             return self.sentencia()
 
-        self.errors.append(f"Declaración inválida: '{tok.lexeme}'")
+        self.errors.append(self._pos(tok) + f"Declaración inválida: '{tok.lexeme}'")
         self.advance()
         return ParseNode("ERROR", [])
 
@@ -125,7 +133,7 @@ class Parser:
 
         self.match(";")
 
-        return ParseNode("decl", [tipo_node, ids_node])
+        return self.node("decl", [tipo_node, ids_node], tipo_node, "DECLARACION")
 
     # identificador → id | identificador , id
     def identificador(self):
@@ -133,19 +141,19 @@ class Parser:
 
         ident = self.match(kind="IDENTIFICADOR")
         if ident:
-            ids.append(ParseNode(ident.lexeme, []))
+            ids.append(self.leaf(ident))
 
         while self.current() and self.current().lexeme == ",":
             self.match(",")
 
             ident = self.match(kind="IDENTIFICADOR")
             if ident:
-                ids.append(ParseNode(ident.lexeme, []))
+                ids.append(self.leaf(ident))
 
         if len(ids) == 1:
             return ids[0]
 
-        return ParseNode("ids", ids)
+        return ParseNode("ids", ids, ids[0].line, ids[0].col)
 
     # tipo → int | float | bool
     def tipo(self):
@@ -153,10 +161,10 @@ class Parser:
 
         if tok and tok.lexeme in ("int", "float", "bool"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         self.errors.append(
-            f"Tipo inválido: '{tok.lexeme if tok else 'EOF'}'"
+            self._pos(tok) + f"Tipo inválido: '{tok.lexeme if tok else 'EOF'}'"
         )
         return ParseNode("ERROR", [])
 
@@ -165,7 +173,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en sentencia")
+            self.errors.append(self._pos() + "Fin inesperado en sentencia")
             return ParseNode("ERROR", [])
 
         match tok.lexeme:
@@ -196,7 +204,7 @@ class Parser:
 
                     return self.asignacion()
 
-                self.errors.append(f"Sentencia inválida: '{tok.lexeme}'")
+                self.errors.append(self._pos(tok) + f"Sentencia inválida: '{tok.lexeme}'")
                 self.advance()
                 return ParseNode("ERROR", [])
 
@@ -213,7 +221,7 @@ class Parser:
             ):
                 node.children.append(self.sentencia())
             else:
-                self.errors.append(f"Sentencia inválida: '{tok.lexeme}'")
+                self.errors.append(self._pos(tok) + f"Sentencia inválida: '{tok.lexeme}'")
                 self.advance()
 
         return node
@@ -231,26 +239,26 @@ class Parser:
     def asignacion(self):
         ident = self.match(kind="IDENTIFICADOR")
 
-        left = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        left = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         self.match("=")
 
         right = self.sent_expresion()
 
-        return ParseNode("=", [left, right])
+        return self.node("=", [left, right], ident, "ASIGNACION")
 
     # id++ ; / id-- ;
     def incremento(self):
         ident = self.match(kind="IDENTIFICADOR")
-        left = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        left = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         op = self.current()
 
         if op and op.lexeme in ("++", "--"):
             self.advance()
-            op_node = ParseNode(op.lexeme, [left])
+            op_node = self.node(op.lexeme, [left], op, "OPERADOR")
         else:
-            self.errors.append("Se esperaba '++' o '--'")
+            self.errors.append(self._pos() + "Se esperaba '++' o '--'")
             op_node = ParseNode("ERROR", [left])
 
         self.match(";")
@@ -269,9 +277,9 @@ class Parser:
 
         return expr
 
-    # seleccion → if expresion then lista_sentencias [ else lista_sentencias ] end
+    # seleccion → if expresion then { sentencias } [ else { sentencias } ] end
     def seleccion(self):
-        self.match("if")
+        tok_if = self.match("if")
 
         condicion = self.expresion()
 
@@ -288,52 +296,60 @@ class Parser:
 
         self.match("end")
 
-        return ParseNode("if", children)
+        return self.node("if", children, tok_if, "SENTENCIA")
 
-    # iteracion → while expresion lista_sentencias end
+    # iteracion → while expresion { sentencias }
     def iteracion(self):
-        self.match("while")
+        tok_while = self.match("while")
 
         condicion = self.expresion()
 
         cuerpo = self.bloque_llaves()
 
-        return ParseNode("while", [condicion, cuerpo])
+        return self.node("while", [condicion, cuerpo], tok_while, "SENTENCIA")
 
-    # repeticion → do lista_sentencias while expresion
+    # repeticion → do { sentencias } while expresion | do { sentencias } until expresion
     def repeticion(self):
-        self.match("do")
+        tok_do = self.match("do")
 
         cuerpo = self.bloque_llaves()
 
-        self.match("while")
-
-        condicion = self.expresion()
-
-        return ParseNode("do-while", [cuerpo, condicion])
+        if self.current() and self.current().lexeme in ("while", "until"):
+            tok_keyword = self.current()
+            self.advance()
+            
+            condicion = self.expresion()
+            
+            if tok_keyword.lexeme == "while":
+                return self.node("do-while", [cuerpo, condicion], tok_do, "SENTENCIA")
+            else:  # until
+                return self.node("do-until", [cuerpo, condicion], tok_do, "SENTENCIA")
+        else:
+            self.errors.append(self._pos() + "Se esperaba 'while' o 'until' después del bloque de 'do'")
+            return self.node("do-while", [cuerpo, ParseNode("ERROR", [])], tok_do, "SENTENCIA")
 
     # sent_in → cin >> id ;
     def sent_in(self):
-        self.match("cin")
+        tok_cin = self.match("cin")
         self.match(">>")
 
         ident = self.match(kind="IDENTIFICADOR")
-        var_node = ParseNode(ident.lexeme, []) if ident else ParseNode("ERROR", [])
+        var_node = self.leaf(ident) if ident else ParseNode("ERROR", [])
 
         self.match(";")
 
-        return ParseNode("cin", [var_node])
+        return self.node("cin", [var_node], tok_cin, "SENTENCIA")
 
     # sent_out → cout << salida ;
     def sent_out(self):
-        self.match("cout")
+        tok_cout = self.match("cout")
         self.match("<<")
 
         salida_node = self.salida()
 
         self.match(";")
 
-        return ParseNode("cout", [salida_node])
+        return self.node("cout", [salida_node], tok_cout, "SENTENCIA")
 
     # salida → cadena | expresion | cadena << expresion | expresion << cadena
     def salida(self):
@@ -341,23 +357,23 @@ class Parser:
             left = self.cadena()
 
             if self.current() and self.current().lexeme == "<<":
-                self.match("<<")
+                tok_out = self.match("<<")
                 right = self.expresion()
-                return ParseNode("<<", [left, right])
+                return self.node("<<", [left, right], tok_out, "OPERADOR")
 
             return left
 
         left = self.expresion()
 
         if self.current() and self.current().lexeme == "<<":
-            self.match("<<")
+            tok_out = self.match("<<")
 
             if self.current() and self.current().kind == "CADENA":
                 right = self.cadena()
-                return ParseNode("<<", [left, right])
+                return self.node("<<", [left, right], tok_out, "OPERADOR")
 
-            self.errors.append("Se esperaba una cadena después de '<<'")
-            return ParseNode("<<", [left, ParseNode("ERROR", [])])
+            self.errors.append(self._pos() + "Se esperaba una cadena después de '<<'")
+            return self.node("<<", [left, ParseNode("ERROR", [])], tok_out, "OPERADOR")
 
         return left
 
@@ -366,7 +382,7 @@ class Parser:
         tok = self.match(kind="CADENA")
 
         if tok:
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         return ParseNode("ERROR", [])
 
@@ -386,10 +402,7 @@ class Parser:
 
             right = self.expresion_relacional()
 
-            left = ParseNode(
-                op.lexeme,
-                [left, right]
-            )
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
     
@@ -407,10 +420,7 @@ class Parser:
 
             right = self.expresion_simple()
 
-            return ParseNode(
-                op.lexeme,
-                [left, right]
-            )
+            return self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -424,7 +434,7 @@ class Parser:
 
             right = self.termino()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -438,7 +448,7 @@ class Parser:
 
             right = self.factor()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -452,7 +462,7 @@ class Parser:
 
             right = self.componente()
 
-            left = ParseNode(op.lexeme, [left, right])
+            left = self.node(op.lexeme, [left, right], op, "OPERADOR")
 
         return left
 
@@ -461,7 +471,7 @@ class Parser:
         tok = self.current()
 
         if tok is None:
-            self.errors.append("Fin inesperado en componente")
+            self.errors.append(self._pos() + "Fin inesperado en componente")
             return ParseNode("ERROR", [])
 
         if tok.lexeme == "(":
@@ -472,29 +482,437 @@ class Parser:
 
         if tok.kind in ("ENTERO", "REAL"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.kind == "IDENTIFICADOR":
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.lexeme in ("true", "false"):
             self.advance()
-            return ParseNode(tok.lexeme, [])
+            return self.leaf(tok)
 
         if tok.kind == "OP_LOGICO":
             op = self.current()
             self.advance()
 
-            return ParseNode(op.lexeme, [self.componente()])
+            return self.node(op.lexeme, [self.componente()], op, "OPERADOR")
 
-        self.errors.append(f"Componente inválido: '{tok.lexeme}'")
+        self.errors.append(self._pos(tok) + f"Componente inválido: '{tok.lexeme}'")
         self.advance()
         return ParseNode("ERROR", [])
     
     def optional_semicolon(self):
         if self.current() and self.current().lexeme == ";":
             self.match(";")
+
+    def node(self, name, children, tok, kind=""):
+        if tok is None:
+            return ParseNode(name, children, 0, 0, kind)
+        return ParseNode(name, children, tok.line, tok.col, kind)
+
+    def leaf(self, tok):
+        return self.node(tok.lexeme, [], tok, tok.kind)
+
+    def _pos(self, tok=None):
+        if tok is None:
+            tok = self.current()
+        if tok is None:
+            if len(self.tokens) > 0:
+                return f"Línea {self.tokens[-1].line}, Col {self.tokens[-1].col}: "
+            return ""
+        return f"Línea {tok.line}, Col {tok.col}: "
+
+
+# ==================== ANÁLISIS SEMÁNTICO ====================
+# Tabla de símbolos (inserción / búsqueda por ámbitos) y verificación de tipos sobre una copia del AST.
+
+@dataclass
+class Symbol:
+    name: str
+    type: str
+    scope: str
+    address: int          # desplazamiento en memoria
+    size: int
+    decl_line: int
+    decl_col: int
+    lines: list           # TODAS las líneas donde aparece (declaración + cada uso), sin repetir, en orden
+
+
+class SymbolTable:
+    def __init__(self):
+        self.scopes = []
+        self.symbols = []
+        self.SIZES = {"int": 4, "float": 4, "bool": 1}
+        self.address_counter = 0
+        self.scope_names = []
+
+    def enter_scope(self, name):
+        self.scopes.append({})
+        self.scope_names.append(name)
+
+    def exit_scope(self):
+        self.scopes.pop()
+        self.scope_names.pop()
+
+    def insert(self, name, type, line, col):
+        if not self.scopes:
+            return None
+        current_scope = self.scopes[-1]
+        if name in current_scope:
+            return None
+        address = self.address_counter
+        self.address_counter += self.SIZES[type]
+        scope_name = self.scope_names[-1] if self.scope_names else "main"
+        symbol = Symbol(name, type, scope_name, address, self.SIZES[type], line, col, [line])
+        current_scope[name] = symbol
+        self.symbols.append(symbol)
+        return symbol
+
+    def lookup(self, name):
+        for scope in reversed(self.scopes):
+            if name in scope:
+                return scope[name]
+        return None
+
+    def add_reference(self, name, line):
+        symbol = self.lookup(name)
+        if symbol and line not in symbol.lines:
+            symbol.lines.append(line)
+
+    def all_symbols(self):
+        return self.symbols
+
+
+class SemanticAnalyzer:
+    def __init__(self):
+        self.symbol_table = SymbolTable()
+        self.errors = []
+        self.trace = []
+
+    def analyze(self, ast):
+        annotated_ast = copy.deepcopy(ast)
+        self.visit(annotated_ast)
+        return annotated_ast, self.symbol_table, self.errors, self.trace
+
+    def visit(self, node):
+        if node.name == "main":
+            self.symbol_table.enter_scope("main")
+            self.visit_main(node)
+            self.symbol_table.exit_scope()
+        elif node.name == "bloque":
+            self.visit_bloque(node)
+        elif node.name == "decl":
+            self.visit_decl(node)
+        elif node.name == "=":
+            self.visit_asignacion(node)
+        elif node.name in ["++", "--"]:
+            self.visit_incremento(node)
+        elif node.name in ["+", "-", "*", "/", "%", "^", "<", "<=", ">", ">=", "==", "!=", "&&", "||"]:
+            self.visit_operador_binario(node)
+        elif node.name == "!":
+            self.visit_operador_unario(node)
+        elif node.name == "if":
+            self.visit_if(node)
+        elif node.name in ["while", "do-while", "do-until"]:
+            self.visit_while(node)
+        elif node.name == "cin":
+            self.visit_cin(node)
+        elif node.name == "cout":
+            self.visit_cout(node)
+        elif node.name == "ids":
+            self.visit_ids(node)
+        elif node.kind == "IDENTIFICADOR":
+            self.visit_identificador(node)
+        elif node.kind in ["ENTERO", "REAL", "PALABRA_RESERVADA", "CADENA"]:
+            self.visit_literal(node)
+        else:
+            # Para nodos como ε o ERROR
+            for child in node.children:
+                self.visit(child)
+            if "tipo" not in node.attrs:
+                node.attrs["tipo"] = "error"
+
+    def visit_main(self, node):
+        self.visit(node.children[0])
+
+    def visit_bloque(self, node):
+        for child in node.children:
+            self.visit(child)
+
+    # decl → tipo ids : el tipo se hereda (dtype) hacia los identificadores declarados
+    def visit_decl(self, node):
+        dtype = node.children[0].name
+        ids_node = node.children[1]
+        node.attrs["dtype"] = dtype
+        if ids_node.name == "ids":
+            ids_node.attrs["dtype"] = dtype
+            for id_child in ids_node.children:
+                self.visit_id_decl(id_child, dtype)
+        elif ids_node.kind == "IDENTIFICADOR":
+            self.visit_id_decl(ids_node, dtype)
+
+    def visit_id_decl(self, node, dtype):
+        symbol = self.symbol_table.insert(node.name, dtype, node.line, node.col)
+        if symbol is None:
+            # Buscar la línea original del símbolo existente
+            existing_symbol = self.symbol_table.lookup(node.name)
+            if existing_symbol:
+                original_line = existing_symbol.decl_line
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Declaración duplicada: el identificador '{node.name}' ya fue declarado en el ámbito '{existing_symbol.scope}' (línea {original_line})"))
+            else:
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Declaración duplicada: el identificador '{node.name}' ya fue declarado en el ámbito 'main' (línea {node.line})"))
+            node.attrs["dtype"] = dtype
+            node.attrs["tipo"] = "error"
+            self.trace.append(f"L{node.line}: decl {dtype} → '{node.name}' DUPLICADO")
+        else:
+            node.attrs["dtype"] = dtype
+            node.attrs["tipo"] = dtype
+            node.attrs["direccion"] = symbol.address
+            self.trace.append(f"L{node.line}: decl {dtype} → inserta '{node.name}' (dtype heredado={dtype}, dir={symbol.address})")
+
+    def visit_asignacion(self, node):
+        id_node = node.children[0]
+        expr_node = node.children[1]
+        self.visit(expr_node)
+        self.visit(id_node)
+        # Identificador no declarado, expresión con error o sentencia vacía (ε): ya reportado o sin nada que verificar
+        if id_node.attrs.get("tipo", "error") == "error" or expr_node.attrs.get("tipo", "error") == "error":
+            node.attrs["tipo"] = "error"
+            return
+        id_type = id_node.attrs["tipo"]
+        expr_type = expr_node.attrs["tipo"]
+        if id_type == expr_type:
+            node.attrs["tipo"] = id_type
+        elif id_type == "float" and expr_type == "int":
+            node.attrs["tipo"] = id_type
+            expr_node.attrs["conversion"] = "int→float"
+            if "valor" in expr_node.attrs:
+                expr_node.attrs["valor"] = float(expr_node.attrs["valor"])
+        elif id_type == "int" and expr_type == "float":
+            self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Incompatibilidad de tipos en asignación: no se puede asignar {expr_type} a '{id_node.name}' de tipo {id_type} (conversión {expr_type}→{id_type} no permitida)"))
+            node.attrs["tipo"] = "error"
+        else:
+            self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Incompatibilidad de tipos en asignación: no se puede asignar {expr_type} a '{id_node.name}' de tipo {id_type}"))
+            node.attrs["tipo"] = "error"
+        if "valor" in expr_node.attrs and node.attrs.get("tipo") != "error":
+            node.attrs["valor"] = expr_node.attrs["valor"]
+        conversion_msg = ""
+        if id_type == "float" and expr_type == "int":
+            conversion_msg = " [conversión int→float]"
+        self.trace.append(f"L{id_node.line}: asignación {id_node.name}({id_type}) ← {expr_type} → {'OK' if node.attrs.get('tipo') != 'error' else 'ERROR'}{conversion_msg}")
+
+    def visit_incremento(self, node):
+        id_node = node.children[0]
+        self.visit(id_node)
+        if id_node.attrs["tipo"] == "error":
+            node.attrs["tipo"] = "error"
+            return
+        if id_node.attrs["tipo"] not in ["int", "float"]:
+            self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '{node.name}': no se puede aplicar a operandos de tipo {id_node.attrs['tipo']}"))
+            node.attrs["tipo"] = "error"
+        else:
+            node.attrs["tipo"] = id_node.attrs["tipo"]
+            self.trace.append(f"L{node.line}: '{node.name}' ({node.attrs['tipo']}) → {node.attrs['tipo']}")
+
+    # Operaciones para el plegado de constantes (valor calculado en compilación)
+    OPERACIONES = {
+        "+": operator.add,
+        "-": operator.sub,
+        "*": operator.mul,
+        "/": lambda a, b: a // b if (isinstance(a, int) and isinstance(b, int)) else a / b,
+        "%": operator.mod,
+        "^": operator.pow,
+        "<": operator.lt,
+        "<=": operator.le,
+        ">": operator.gt,
+        ">=": operator.ge,
+        "==": operator.eq,
+        "!=": operator.ne,
+        "&&": lambda a, b: a and b,
+        "||": lambda a, b: a or b,
+    }
+
+    # Conversión implícita int→float cuando se combinan int y float; se anota en el operando int
+    def promover(self, left, right, left_type, right_type):
+        if left_type == "int" and right_type == "float":
+            left.attrs["conversion"] = "int→float"
+            if "valor" in left.attrs:
+                left.attrs["valor"] = float(left.attrs["valor"])
+            return " [conversión int→float en operando izquierdo]"
+        if left_type == "float" and right_type == "int":
+            right.attrs["conversion"] = "int→float"
+            if "valor" in right.attrs:
+                right.attrs["valor"] = float(right.attrs["valor"])
+            return " [conversión int→float en operando derecho]"
+        return ""
+
+    def visit_operador_binario(self, node):
+        left = node.children[0]
+        right = node.children[1]
+        self.visit(left)
+        self.visit(right)
+        left_type = left.attrs.get("tipo", "error")
+        right_type = right.attrs.get("tipo", "error")
+
+        # Un operando con error ya fue reportado: se propaga sin generar errores en cascada
+        if left_type == "error" or right_type == "error":
+            node.attrs["tipo"] = "error"
+            return
+
+        numericos = ("int", "float")
+        conversion_msg = ""
+
+        if node.name in ["+", "-", "*", "/", "^"]:
+            if left_type not in numericos or right_type not in numericos:
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '{node.name}': no se puede aplicar a operandos de tipo {left_type} y {right_type}"))
+                node.attrs["tipo"] = "error"
+                return
+            conversion_msg = self.promover(left, right, left_type, right_type)
+            node.attrs["tipo"] = "float" if "float" in (left_type, right_type) else "int"
+        elif node.name == "%":
+            if left_type != "int" or right_type != "int":
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '%': requiere operandos int, se recibió {left_type} y {right_type}"))
+                node.attrs["tipo"] = "error"
+                return
+            node.attrs["tipo"] = "int"
+        elif node.name in ["<", "<=", ">", ">="]:
+            if left_type not in numericos or right_type not in numericos:
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '{node.name}': no se puede aplicar a operandos de tipo {left_type} y {right_type}"))
+                node.attrs["tipo"] = "error"
+                return
+            conversion_msg = self.promover(left, right, left_type, right_type)
+            node.attrs["tipo"] = "bool"
+        elif node.name in ["==", "!="]:
+            if (left_type in numericos and right_type in numericos) or (left_type == right_type == "bool"):
+                conversion_msg = self.promover(left, right, left_type, right_type)
+                node.attrs["tipo"] = "bool"
+            else:
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Incompatibilidad de tipos: no se puede comparar {left_type} con {right_type} usando '{node.name}'"))
+                node.attrs["tipo"] = "error"
+                return
+        elif node.name in ["&&", "||"]:
+            if left_type != "bool" or right_type != "bool":
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '{node.name}': requiere operandos bool, se recibió {left_type} y {right_type}"))
+                node.attrs["tipo"] = "error"
+                return
+            node.attrs["tipo"] = "bool"
+
+        # Valor (sintetizado): sólo cuando ambos operandos son constantes conocidas
+        if "valor" in left.attrs and "valor" in right.attrs:
+            if node.name in ["/", "%"] and right.attrs["valor"] == 0:
+                self.errors.append(ErrorItem(node.line, node.col, "Semántico", "División entre cero"))
+            else:
+                node.attrs["valor"] = self.OPERACIONES[node.name](left.attrs["valor"], right.attrs["valor"])
+
+        self.trace.append(f"L{node.line}: '{node.name}' ({left_type}, {right_type}) → {node.attrs['tipo']}{conversion_msg}")
+
+    def visit_operador_unario(self, node):
+        child = node.children[0]
+        self.visit(child)
+        child_type = child.attrs.get("tipo", "error")
+        if child_type == "error":
+            node.attrs["tipo"] = "error"
+            return
+        if child_type != "bool":
+            self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Uso indebido del operador '{node.name}': no se puede aplicar a operandos de tipo {child_type}"))
+            node.attrs["tipo"] = "error"
+            return
+        node.attrs["tipo"] = "bool"
+        if "valor" in child.attrs:
+            node.attrs["valor"] = not child.attrs["valor"]
+        self.trace.append(f"L{node.line}: '{node.name}' ({child_type}) → bool")
+
+    # Las condiciones de if/while/do deben ser bool (atributo heredado "esperado")
+    def verificar_condicion(self, cond, sentencia):
+        self.visit(cond)
+        cond.attrs["esperado"] = "bool"
+        cond_type = cond.attrs.get("tipo", "error")
+        if cond_type == "bool":
+            self.trace.append(f"L{cond.line}: condición de {sentencia} → bool OK")
+        elif cond_type != "error":
+            self.errors.append(ErrorItem(cond.line, cond.col, "Semántico", f"La condición de '{sentencia}' debe ser de tipo bool, se obtuvo {cond_type}"))
+            self.trace.append(f"L{cond.line}: condición de {sentencia} → ERROR ({cond_type})")
+
+    def visit_if(self, node):
+        self.verificar_condicion(node.children[0], "if")
+        for bloque in node.children[1:]:
+            self.visit(bloque)
+
+    def visit_while(self, node):
+        if node.name == "while":
+            self.verificar_condicion(node.children[0], "while")
+            self.visit(node.children[1])
+        else:
+            # do-while / do-until: el cuerpo aparece antes que la condición
+            self.visit(node.children[0])
+            self.verificar_condicion(node.children[1], node.name)
+
+    def visit_cin(self, node):
+        id_node = node.children[0]
+        self.visit(id_node)
+        if id_node.attrs["tipo"] == "error":
+            return
+        node.attrs["tipo"] = id_node.attrs["tipo"]
+        self.trace.append(f"L{id_node.line}: cin >> {id_node.name} ({id_node.attrs['tipo']})")
+
+    def visit_cout(self, node):
+        output = node.children[0]
+        self.visit(output)
+
+    def visit_ids(self, node):
+        dtype = node.attrs.get("dtype", "error")
+        for child in node.children:
+            child.attrs["dtype"] = dtype
+            self.visit(child)
+
+    def visit_identificador(self, node):
+        symbol = self.symbol_table.lookup(node.name)
+        if symbol is None:
+            self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Identificador no declarado: '{node.name}'"))
+            node.attrs["tipo"] = "error"
+            self.trace.append(f"L{node.line}: busca '{node.name}' → NO encontrado")
+        else:
+            node.attrs["tipo"] = symbol.type
+            node.attrs["direccion"] = symbol.address
+            self.symbol_table.add_reference(node.name, node.line)
+            self.trace.append(f"L{node.line}: busca '{node.name}' → encontrado ({symbol.type}, dir={symbol.address})")
+
+    def visit_literal(self, node):
+        if node.kind == "ENTERO":
+            node.attrs["tipo"] = "int"
+            node.attrs["valor"] = int(node.name)
+        elif node.kind == "REAL":
+            node.attrs["tipo"] = "float"
+            node.attrs["valor"] = float(node.name)
+        elif node.kind == "PALABRA_RESERVADA":
+            if node.name == "true":
+                node.attrs["tipo"] = "bool"
+                node.attrs["valor"] = True
+            elif node.name == "false":
+                node.attrs["tipo"] = "bool"
+                node.attrs["valor"] = False
+        elif node.kind == "CADENA":
+            node.attrs["tipo"] = "cadena"
+
+
+def format_annotated_tree(node, indent=0) -> list[str]:
+    attrs_str = ""
+    if node.attrs:
+        attr_items = []
+        for key, value in node.attrs.items():
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            elif isinstance(value, float):
+                value = round(value, 6)
+            attr_items.append(f"{key}={value}")
+        attrs_str = "  {" + ", ".join(attr_items) + "}"
+    line_info = f"  (L{node.line}:C{node.col})" if node.line != 0 else ""
+    result = ["  " * indent + f"{node.name}{attrs_str}{line_info}"]
+    for child in node.children:
+        result.extend(format_annotated_tree(child, indent + 1))
+    return result
+
 
 class IDE(tk.Tk):
     RESERVED = {
@@ -742,6 +1160,47 @@ class IDE(tk.Tk):
         tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.syntax_tree.configure(yscrollcommand=tree_scroll.set)
+
+        # Árbol anotado (AST con atributos semánticos)
+        self.annotated_tree_frame = ttk.Frame(self.nb_right)
+        self.nb_right.add(self.annotated_tree_frame, text="Árbol Anotado")
+
+        self.annotated_tree = ttk.Treeview(
+            self.annotated_tree_frame,
+            columns=("tipo", "valor", "atributos", "pos"),
+            show="tree headings"
+        )
+        self.annotated_tree.heading("#0", text="Nodo")
+        self.annotated_tree.heading("tipo", text="tipo")
+        self.annotated_tree.heading("valor", text="valor")
+        self.annotated_tree.heading("atributos", text="atributos")
+        self.annotated_tree.heading("pos", text="pos")
+
+        self.annotated_tree.column("#0", width=200, stretch=False)
+        self.annotated_tree.column("tipo", width=60, stretch=False)
+        self.annotated_tree.column("valor", width=70, stretch=False)
+        self.annotated_tree.column("atributos", width=260, stretch=True)
+        self.annotated_tree.column("pos", width=70, stretch=False)
+
+        ann_scroll_y = ttk.Scrollbar(
+            self.annotated_tree_frame,
+            orient="vertical",
+            command=self.annotated_tree.yview
+        )
+        ann_scroll_x = ttk.Scrollbar(
+            self.annotated_tree_frame,
+            orient="horizontal",
+            command=self.annotated_tree.xview
+        )
+
+        self.annotated_tree.configure(
+            yscrollcommand=ann_scroll_y.set,
+            xscrollcommand=ann_scroll_x.set
+        )
+
+        ann_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
+        ann_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.annotated_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Paneles inferiores
         self.nb_bottom = ttk.Notebook(bottom)
@@ -1334,16 +1793,6 @@ class IDE(tk.Tk):
                 f"{idx:03d} | {t.kind:<18} | {t.lexeme:<20} | {t.line:<5} | {t.col}"
             )
 
-        # ----------- FORMATO DE ERRORES -----------
-        error_lines = []
-        error_lines.append("No. | Tipo    | Línea | Columna | Descripción")
-        error_lines.append("-" * 75)
-
-        for idx, e in enumerate(errors, start=1):
-            error_lines.append(
-                f"{idx:03d} | {e.kind:<7} | {e.line:<5} | {e.col:<7} | {e.message}"
-            )
-
         # ----------- MOSTRAR EN EL IDE -----------
         self._write_readonly(
             self.out_tokens,
@@ -1352,7 +1801,7 @@ class IDE(tk.Tk):
 
         self._write_readonly(
             self.out_err,
-            "\n".join(error_lines) if errors else "(sin errores léxicos)"
+            self._format_errors(errors, "(sin errores léxicos)")
         )
 
         # Cambiar pestañas automáticamente
@@ -1360,6 +1809,37 @@ class IDE(tk.Tk):
         self.nb_bottom.select(self.out_err.master)
 
         self._log("Análisis Léxico ejecutado.")
+
+    # -------------------------- ERRORES --------------------------
+    def _format_errors(self, errors, empty_text="(sin errores)"):
+        if not errors:
+            return empty_text
+
+        error_lines = []
+        error_lines.append("No. | Tipo       | Línea | Columna | Descripción")
+        error_lines.append("-" * 75)
+
+        for idx, e in enumerate(errors, start=1):
+            error_lines.append(
+                f"{idx:03d} | {e.kind:<10} | {e.line:<5} | {e.col:<7} | {e.message}"
+            )
+
+        return "\n".join(error_lines)
+
+    # Convierte los mensajes del parser ("Línea N, Col M: ...") en ErrorItem
+    def _parse_errors_to_items(self, parse_errors):
+        pattern = re.compile(r"Línea (\d+), Col (\d+): (.*)")
+        items = []
+
+        for error_str in parse_errors:
+            match = pattern.match(error_str)
+            if match:
+                line, col, message = match.groups()
+                items.append(ErrorItem(int(line), int(col), "Sintáctico", message))
+            else:
+                items.append(ErrorItem(0, 0, "Sintáctico", error_str))
+
+        return items
 
     # -------------------------- OTRAS FASES --------------------------
     def _show_parse_tree(self, root_node: ParseNode):
@@ -1407,16 +1887,7 @@ class IDE(tk.Tk):
 
         # Si hay errores léxicos, no conviene hacer sintáctico
         if lex_errors:
-            error_lines = []
-            error_lines.append("No. | Tipo    | Línea | Columna | Descripción")
-            error_lines.append("-" * 75)
-
-            for idx, e in enumerate(lex_errors, start=1):
-                error_lines.append(
-                    f"{idx:03d} | {e.kind:<7} | {e.line:<5} | {e.col:<7} | {e.message}"
-                )
-
-            self._write_readonly(self.out_err, "\n".join(error_lines))
+            self._write_readonly(self.out_err, self._format_errors(lex_errors))
             self._write_readonly(
                 self.out_parse,
                 "No se puede generar árbol sintáctico porque existen errores léxicos."
@@ -1443,6 +1914,11 @@ class IDE(tk.Tk):
                 self.out_parse,
                 "\n".join(parse_errors)
             )
+            self._write_readonly(
+                self.out_err,
+                self._format_errors(self._parse_errors_to_items(parse_errors))
+            )
+            self.nb_bottom.select(self.out_err.master)
             self._log("Análisis Sintáctico ejecutado con errores.")
         else:
             self._write_readonly(
@@ -1487,14 +1963,135 @@ class IDE(tk.Tk):
 
         insert_node("", root_node)
 
+    # -------------------------- FASE SEMÁNTICA --------------------------
+    def _format_attr(self, value):
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, float):
+            return str(round(value, 6))
+        return str(value)
+
+    def _show_annotated_tree(self, root_node: ParseNode):
+        self.annotated_tree.delete(*self.annotated_tree.get_children())
+
+        def insert_node(parent_id, node):
+            # tipo y valor van en su propia columna; el resto de atributos se agrupa
+            otros = ", ".join(
+                f"{k}={self._format_attr(v)}"
+                for k, v in node.attrs.items()
+                if k not in ("tipo", "valor")
+            )
+            item = self.annotated_tree.insert(
+                parent_id,
+                "end",
+                text=node.name,
+                open=True,
+                values=(
+                    node.attrs.get("tipo", ""),
+                    self._format_attr(node.attrs["valor"]) if "valor" in node.attrs else "",
+                    otros,
+                    f"L{node.line}:C{node.col}" if node.line > 0 else ""
+                )
+            )
+
+            for child in node.children:
+                insert_node(item, child)
+
+        insert_node("", root_node)
+
     def run_sem(self):
-        self._write_readonly(self.out_sem, "Validaciones semánticas simuladas.")
-        self.nb_right.select(self.out_sem.master)
-        self._log("Análisis Semántico simulado.")
+        code = self.text.get("1.0", "end-1c")
+        tokens, lex_errors = self.lex_analysis(code)
+
+        # Sin tokens válidos no hay AST sobre el cual trabajar
+        if lex_errors:
+            self._write_readonly(self.out_err, self._format_errors(lex_errors))
+            self._write_readonly(
+                self.out_sem,
+                "No se puede realizar el análisis semántico porque existen errores léxicos."
+            )
+            self.nb_bottom.select(self.out_err.master)
+            self.nb_right.select(self.out_sem.master)
+            return
+
+        filtered_tokens = [
+            t for t in tokens
+            if not t.kind.startswith("COMENTARIO")
+        ]
+
+        parser = Parser(filtered_tokens)
+        tree, parse_errors = parser.parse()
+
+        # AST original, para comparar contra el árbol anotado
+        self._show_parse_tree(tree)
+
+        if parse_errors:
+            self._write_readonly(self.out_parse, "\n".join(parse_errors))
+            self._write_readonly(
+                self.out_err,
+                self._format_errors(self._parse_errors_to_items(parse_errors))
+            )
+            self._write_readonly(
+                self.out_sem,
+                "No se puede realizar el análisis semántico porque existen errores sintácticos."
+            )
+            self.nb_bottom.select(self.out_err.master)
+            self.nb_right.select(self.out_sem.master)
+            return
+
+        self._write_readonly(self.out_parse, "Análisis sintáctico correcto.")
+
+        analizador = SemanticAnalyzer()
+        arbol_anotado, tabla, errores_sem, traza = analizador.analyze(tree)
+
+        # ----------- RESULTADO, RECORRIDO Y ÁRBOL ANOTADO -----------
+        result_lines = ["=== RESULTADO DEL ANÁLISIS SEMÁNTICO ==="]
+        if errores_sem:
+            result_lines.append(f"Se encontraron {len(errores_sem)} errores semánticos.")
+        else:
+            result_lines.append("Análisis semántico correcto.")
+        result_lines.append("")
+        result_lines.append("=== RECORRIDO SEMÁNTICO (traza) ===")
+        result_lines.extend(traza)
+        result_lines.append("")
+        result_lines.append("=== ÁRBOL CON ANOTACIONES SEMÁNTICAS ===")
+        result_lines.extend(format_annotated_tree(arbol_anotado))
+
+        self._write_readonly(self.out_sem, "\n".join(result_lines))
+
+        # ----------- TABLA DE SÍMBOLOS -----------
+        symbols = tabla.all_symbols()
+        if symbols:
+            sym_lines = []
+            sym_lines.append("No. | Nombre     | Tipo   | Ámbito | Dirección | Tamaño | Líneas")
+            sym_lines.append("-" * 75)
+
+            for idx, sym in enumerate(symbols, start=1):
+                lines_str = ", ".join(map(str, sym.lines))
+                sym_lines.append(
+                    f"{idx:03d} | {sym.name:<10} | {sym.type:<6} | {sym.scope:<6} | "
+                    f"{sym.address:<9} | {sym.size:<6} | {lines_str}"
+                )
+
+            self._write_readonly(self.out_sym, "\n".join(sym_lines))
+        else:
+            self._write_readonly(self.out_sym, "(tabla de símbolos vacía)")
+
+        # ----------- ERRORES SEMÁNTICOS -----------
+        self._write_readonly(
+            self.out_err,
+            self._format_errors(errores_sem, "(sin errores semánticos)")
+        )
+
+        self._show_annotated_tree(arbol_anotado)
+
+        self.nb_right.select(self.annotated_tree_frame)
+        self.nb_bottom.select(self.out_err.master)
+
+        self._log(f"Análisis Semántico ejecutado: {len(errores_sem)} errores.")
 
     def run_ir(self):
         self._write_readonly(self.out_ir, "Código intermedio simulado.")
-        self._write_readonly(self.out_sym, "Tabla de símbolos simulada.")
         self.nb_right.select(self.out_ir.master)
         self._log("Generación de Código Intermedio simulado.")
 
