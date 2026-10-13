@@ -235,13 +235,6 @@ class Parser:
 
         return node
 
-    # Cuerpo de if/else: lista_sentencias hasta la palabra clave, o { ... } (llaves opcionales)
-    def cuerpo(self, stop_words):
-        if self.current() and self.current().lexeme == "{":
-            return self.bloque_llaves()
-
-        return self.lista_sentencias(stop_words=stop_words)
-
     # asignacion → id = sent_expresion
     def asignacion(self):
         ident = self.match(kind="IDENTIFICADOR")
@@ -284,7 +277,7 @@ class Parser:
 
         return expr
 
-    # seleccion → if expresion then lista_sentencias [ else lista_sentencias ] end
+    # seleccion → if expresion then { sentencias } [ else { sentencias } ] end
     def seleccion(self):
         tok_if = self.match("if")
 
@@ -292,71 +285,48 @@ class Parser:
 
         self.match("then")
 
-        entonces = self.cuerpo(("else", "end"))
+        entonces = self.bloque_llaves()
 
         children = [condicion, entonces]
 
         if self.current() and self.current().lexeme == "else":
             self.match("else")
-            sino = self.cuerpo(("end",))
+            sino = self.bloque_llaves()
             children.append(sino)
 
         self.match("end")
 
         return self.node("if", children, tok_if, "SENTENCIA")
 
-    # iteracion → while expresion lista_sentencias end
+    # iteracion → while expresion { sentencias }
     def iteracion(self):
         tok_while = self.match("while")
 
         condicion = self.expresion()
 
-        if self.current() and self.current().lexeme == "{":
-            cuerpo = self.bloque_llaves()
-        else:
-            cuerpo = self.lista_sentencias(stop_words=("end",))
-            self.match("end")
+        cuerpo = self.bloque_llaves()
 
         return self.node("while", [condicion, cuerpo], tok_while, "SENTENCIA")
 
-    # repeticion → do lista_sentencias while expresion
+    # repeticion → do { sentencias } while expresion | do { sentencias } until expresion
     def repeticion(self):
         tok_do = self.match("do")
 
-        # Verificar si el cuerpo empieza con llave
-        if self.current() and self.current().lexeme == "{":
-            cuerpo = self.bloque_llaves()
+        cuerpo = self.bloque_llaves()
+
+        if self.current() and self.current().lexeme in ("while", "until"):
+            tok_keyword = self.current()
+            self.advance()
             
-            # Verificar si sigue "while" o "until"
-            if self.current() and self.current().lexeme in ("while", "until"):
-                tok_keyword = self.current()
-                self.advance()
-                
-                condicion = self.expresion()
-                
-                if tok_keyword.lexeme == "while":
-                    return self.node("do-while", [cuerpo, condicion], tok_do, "SENTENCIA")
-                else:  # until
-                    return self.node("do-until", [cuerpo, condicion], tok_do, "SENTENCIA")
-            else:
-                self.errors.append(self._pos() + "Se esperaba 'while' o 'until'")
-                return ParseNode("ERROR", [])
-        else:
-            cuerpo = self.lista_sentencias(stop_words=("until",))
+            condicion = self.expresion()
             
-            # Verificar que haya "until"
-            if self.current() and self.current().lexeme == "until":
-                tok_until = self.match("until")
-                condicion = self.expresion()
+            if tok_keyword.lexeme == "while":
+                return self.node("do-while", [cuerpo, condicion], tok_do, "SENTENCIA")
+            else:  # until
                 return self.node("do-until", [cuerpo, condicion], tok_do, "SENTENCIA")
-            else:
-                # Si no hay until, verificar si es while
-                if self.current() and self.current().lexeme == "while":
-                    self.errors.append(self._pos() + "Se esperaba 'until' después de 'do'")
-                    return ParseNode("ERROR", [])
-                else:
-                    self.errors.append(self._pos() + "Se esperaba 'until' o 'while' después de 'do'")
-                    return ParseNode("ERROR", [])
+        else:
+            self.errors.append(self._pos() + "Se esperaba 'while' o 'until' después del bloque de 'do'")
+            return self.node("do-while", [cuerpo, ParseNode("ERROR", [])], tok_do, "SENTENCIA")
 
     # sent_in → cin >> id ;
     def sent_in(self):
