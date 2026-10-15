@@ -1104,8 +1104,8 @@ class IDE(tk.Tk):
         editor_wrap = ttk.Frame(self.top_h)
         panels_wrap = ttk.Frame(self.top_h)
 
-        self.top_h.add(editor_wrap, minsize=900)
-        self.top_h.add(panels_wrap, minsize=220)
+        self.top_h.add(editor_wrap, minsize=400)
+        self.top_h.add(panels_wrap, minsize=400)
 
         # Editor
         self.editor_frame = ttk.Frame(editor_wrap)
@@ -1241,7 +1241,8 @@ class IDE(tk.Tk):
             top_h_px = int(pv_h * 0.70)
             top_h_px = max(250, min(top_h_px, pv_h - 120))
             try:
-                self.root_v.sashpos(0, top_h_px)
+                # tk.PanedWindow usa sash_place (sashpos es de ttk.PanedWindow)
+                self.root_v.sash_place(0, 0, top_h_px)
             except tk.TclError:
                 pass
 
@@ -1250,10 +1251,11 @@ class IDE(tk.Tk):
             if ph_w < 500:
                 return
 
-            left_w_px = int(ph_w * 0.60)
-            left_w_px = max(300, min(left_w_px, ph_w - 220))
+            # Editor ~40% del ancho, paneles de salida de las fases ~60%
+            left_w_px = int(ph_w * 0.40)
+            left_w_px = max(400, min(left_w_px, ph_w - 400))
             try:
-                self.top_h.sashpos(0, left_w_px)
+                self.top_h.sash_place(0, left_w_px, 0)
             except tk.TclError:
                 pass
 
