@@ -1818,12 +1818,12 @@ class IDE(tk.Tk):
             return empty_text
 
         error_lines = []
-        error_lines.append("No. | Tipo       | Línea | Columna | Descripción")
+        error_lines.append("No. | Tipo       | Línea | Descripción")
         error_lines.append("-" * 75)
 
         for idx, e in enumerate(errors, start=1):
             error_lines.append(
-                f"{idx:03d} | {e.kind:<10} | {e.line:<5} | {e.col:<7} | {e.message}"
+                f"{idx:03d} | {e.kind:<10} | {e.line:<5} | {e.message}"
             )
 
         return "\n".join(error_lines)
