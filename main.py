@@ -536,7 +536,8 @@ class Symbol:
     size: int
     decl_line: int
     decl_col: int
-    lines: list           # TODAS las líneas donde aparece (declaración + cada uso), sin repetir, en orden
+    lines: list           # TODAS las líneas donde aparece (declaración + cada uso), en orden; se repite si aparece varias veces en la misma línea
+    valor: object = None  # último valor conocido en compilación (None = desconocido)
 
 
 class SymbolTable:
@@ -577,7 +578,7 @@ class SymbolTable:
 
     def add_reference(self, name, line):
         symbol = self.lookup(name)
-        if symbol and line not in symbol.lines:
+        if symbol:
             symbol.lines.append(line)
 
     def all_symbols(self):
@@ -695,8 +696,16 @@ class SemanticAnalyzer:
         else:
             self.errors.append(ErrorItem(node.line, node.col, "Semántico", f"Incompatibilidad de tipos en asignación: no se puede asignar {expr_type} a '{id_node.name}' de tipo {id_type}"))
             node.attrs["tipo"] = "error"
-        if "valor" in expr_node.attrs and node.attrs.get("tipo") != "error":
-            node.attrs["valor"] = expr_node.attrs["valor"]
+        if node.attrs.get("tipo") != "error":
+            symbol = self.symbol_table.lookup(id_node.name)
+            if "valor" in expr_node.attrs:
+                node.attrs["valor"] = expr_node.attrs["valor"]
+                id_node.attrs["valor"] = expr_node.attrs["valor"]
+                symbol.valor = expr_node.attrs["valor"]
+            else:
+                # El nuevo valor no se conoce en compilación
+                id_node.attrs.pop("valor", None)
+                symbol.valor = None
         conversion_msg = ""
         if id_type == "float" and expr_type == "int":
             conversion_msg = " [conversión int→float]"
@@ -713,6 +722,11 @@ class SemanticAnalyzer:
             node.attrs["tipo"] = "error"
         else:
             node.attrs["tipo"] = id_node.attrs["tipo"]
+            symbol = self.symbol_table.lookup(id_node.name)
+            if "valor" in id_node.attrs:
+                nuevo = id_node.attrs["valor"] + (1 if node.name == "++" else -1)
+                node.attrs["valor"] = nuevo
+                symbol.valor = nuevo
             self.trace.append(f"L{node.line}: '{node.name}' ({node.attrs['tipo']}) → {node.attrs['tipo']}")
 
     # Operaciones para el plegado de constantes (valor calculado en compilación)
@@ -854,6 +868,9 @@ class SemanticAnalyzer:
         if id_node.attrs["tipo"] == "error":
             return
         node.attrs["tipo"] = id_node.attrs["tipo"]
+        # El valor leído no se conoce en compilación
+        id_node.attrs.pop("valor", None)
+        self.symbol_table.lookup(id_node.name).valor = None
         self.trace.append(f"L{id_node.line}: cin >> {id_node.name} ({id_node.attrs['tipo']})")
 
     def visit_cout(self, node):
@@ -875,6 +892,8 @@ class SemanticAnalyzer:
         else:
             node.attrs["tipo"] = symbol.type
             node.attrs["direccion"] = symbol.address
+            if symbol.valor is not None:
+                node.attrs["valor"] = symbol.valor
             self.symbol_table.add_reference(node.name, node.line)
             self.trace.append(f"L{node.line}: busca '{node.name}' → encontrado ({symbol.type}, dir={symbol.address})")
 
