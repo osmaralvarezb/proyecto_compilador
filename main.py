@@ -4,9 +4,13 @@ import os
 import re
 import tkinter as tk
 import sv_ttk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, simpledialog
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import tm
+from cgen import codeGen
+from intermedio import generarCodigoIntermedio
 
 
 @dataclass
@@ -1161,7 +1165,8 @@ class IDE(tk.Tk):
         self.out_tokens = self._make_readonly_text_tab(self.nb_right, "Tokens (Léxico)")
         self.out_parse = self._make_readonly_text_tab(self.nb_right, "Sintáctico")
         self.out_sem = self._make_readonly_text_tab(self.nb_right, "Semántico")
-        self.out_ir = self._make_readonly_text_tab(self.nb_right, "Intermedio")
+        self.out_ir = self._make_readonly_text_tab(self.nb_right, "Código Intermedio")
+        self.out_ci = self._make_readonly_text_tab(self.nb_right, "Código intermedio de tres direcciones")
         self.out_sym = self._make_readonly_text_tab(self.nb_right, "Tabla Símbolos")
 
         # Árbol sintáctico
@@ -2033,7 +2038,7 @@ class IDE(tk.Tk):
             )
             self.nb_bottom.select(self.out_err.master)
             self.nb_right.select(self.out_sem.master)
-            return
+            return None
 
         filtered_tokens = [
             t for t in tokens
@@ -2058,7 +2063,7 @@ class IDE(tk.Tk):
             )
             self.nb_bottom.select(self.out_err.master)
             self.nb_right.select(self.out_sem.master)
-            return
+            return None
 
         self._write_readonly(self.out_parse, "Análisis sintáctico correcto.")
 
@@ -2110,16 +2115,76 @@ class IDE(tk.Tk):
         self.nb_bottom.select(self.out_err.master)
 
         self._log(f"Análisis Semántico ejecutado: {len(errores_sem)} errores.")
+        return arbol_anotado, tabla, errores_sem
 
+    # -------------------------- GENERACIÓN DE CÓDIGO --------------------------
+    # Compila el programa del editor y regresa el texto .tm, o None si hubo errores.
+    # Siempre se recompila el fuente actual para no mostrar/ejecutar una salida anterior.
     def run_ir(self):
-        self._write_readonly(self.out_ir, "Código intermedio simulado.")
-        self.nb_right.select(self.out_ir.master)
-        self._log("Generación de Código Intermedio simulado.")
+        self.last_tm = None
+        resultado = self.run_sem()
+        if resultado is None or resultado[2]:
+            aviso = "No se generó código: el programa tiene errores (ver pestaña Errores)."
+            self._write_readonly(self.out_ir, aviso)
+            self._write_readonly(self.out_ci, aviso)
+            self.nb_right.select(self.out_ir.master)
+            self._log("Generación de código cancelada por errores.")
+            return None
 
+        arbol, tabla, _ = resultado
+        base = self.current_file.with_suffix("") if self.current_file else Path.cwd() / "programa"
+        tm_path, ci_path = base.with_suffix(".tm"), base.with_suffix(".ci")
+        # st_lookup: nombre -> dirección asignada por la tabla de símbolos
+        symtab = {s.name: s.address for s in tabla.all_symbols()}
+
+        tm_text = codeGen(arbol, symtab, tm_path.name)
+        ci_text = generarCodigoIntermedio(arbol)
+
+        try:
+            tm_path.write_text(tm_text, encoding="utf-8")
+            ci_path.write_text(ci_text, encoding="utf-8")
+            self._log(f"Código generado: {tm_path} y {ci_path}")
+        except OSError as ex:
+            self._log(f"No se pudieron escribir los archivos de código: {ex}")
+
+        self._write_readonly(self.out_ir, f"Archivo: {tm_path.name}\n\n{tm_text}")
+        self._write_readonly(self.out_ci, f"Archivo: {ci_path.name}\n\n{ci_text}")
+        self.nb_right.select(self.out_ir.master)
+        self.last_tm = tm_text
+        return tm_text
+
+    # Ejecuta en el simulador TM el código recién generado (nunca el fuente ni el .ci)
     def run_exec(self):
-        self._write_readonly(self.out_exec, "Salida de ejecución simulada.")
+        self._write_readonly(self.out_exec, "")
+        tm_text = self.run_ir()
+        if tm_text is None:
+            self._write_readonly(self.out_exec, "No se ejecutó: el programa tiene errores.")
+            self.nb_bottom.select(self.out_err.master)
+            return
+
         self.nb_bottom.select(self.out_exec.master)
-        self._log("Ejecución simulada.")
+
+        def salida(texto):
+            self.out_exec.config(state="normal")
+            self.out_exec.insert("end", texto)
+            self.out_exec.see("end")
+            self.out_exec.config(state="disabled")
+            self.update_idletasks()
+
+        def entrada(prompt):
+            dato = simpledialog.askstring("Entrada (IN)", prompt, parent=self)
+            if dato is not None:
+                salida(f"{prompt}{dato}\n")
+            return dato
+
+        salida("=== Ejecución en la TM ===\n")
+        try:
+            estado, pasos = tm.run(tm_text, entrada, salida)
+            salida(f"\n{tm.MENSAJES[estado]} ({pasos} instrucciones ejecutadas)\n")
+            self._log(f"Ejecución TM: {estado}")
+        except tm.TMError as ex:
+            salida(f"\nError al cargar el código TM: {ex}\n")
+            self._log("Ejecución TM: error de carga")
 
     def exit_program(self):
         if self._confirm_discard():
