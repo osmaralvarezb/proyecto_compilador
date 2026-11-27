@@ -55,6 +55,8 @@ En el IDE, **Intermedio** genera `.tm` y `.ci` junto al archivo fuente (o `progr
 "Código Intermedio" y "Código intermedio de tres direcciones". **Ejecutar** recompila el fuente actual y corre el `.tm` en la TM;
 las entradas `IN` se piden en un cuadro de diálogo y la salida aparece en la pestaña "Ejecución".
 
-Extensiones a la TM de Louden para cubrir el lenguaje: `DIVF` (división real), `INF` (lectura real),
-`OUTC` (escribir un carácter, para cadenas y saltos de línea). `%` y `^` se generan con DIV/MUL/SUB y un ciclo.
+Se usa la TM original de tm.c sin cambios: mismas instrucciones (HALT, IN, OUT, ADD, SUB, MUL, DIV, LD, ST, LDA, LDC, JLT..JNE),
+mismos tamaños de memoria y mismos mensajes. El `.tm` generado también se puede correr con el `tm.exe` del aula.
+`%` y `^` se generan con DIV/MUL/SUB y un ciclo. Como la TM sólo maneja enteros, un programa con `float` marca un error de
+generación, y las cadenas de `cout` quedan sólo como comentario en el `.tm` (OUT sólo imprime enteros).
 El lenguaje no tiene menos unario: `-1` se escribe `0 - 1`.

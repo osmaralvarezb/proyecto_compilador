@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import tm
-from cgen import codeGen
+from cgen import codeGen, CodeGenError
 from intermedio import generarCodigoIntermedio
 
 
@@ -2137,7 +2137,19 @@ class IDE(tk.Tk):
         # st_lookup: nombre -> dirección asignada por la tabla de símbolos
         symtab = {s.name: s.address for s in tabla.all_symbols()}
 
-        tm_text = codeGen(arbol, symtab, tm_path.name)
+        try:
+            tm_text, avisos = codeGen(arbol, symtab, tm_path.name)
+        except CodeGenError as ex:
+            aviso = f"No se generó código TM: {ex}"
+            self._write_readonly(self.out_ir, aviso)
+            self._write_readonly(self.out_ci, aviso)
+            self._write_readonly(self.out_err, f"Generación | {ex}")
+            self.nb_right.select(self.out_ir.master)
+            self.nb_bottom.select(self.out_err.master)
+            self._log(aviso)
+            return None
+        for aviso in avisos:
+            self._log(f"Aviso: {aviso}")
         ci_text = generarCodigoIntermedio(arbol)
 
         try:
@@ -2179,9 +2191,13 @@ class IDE(tk.Tk):
 
         salida("=== Ejecución en la TM ===\n")
         try:
-            estado, pasos = tm.run(tm_text, entrada, salida)
-            salida(f"\n{tm.MENSAJES[estado]} ({pasos} instrucciones ejecutadas)\n")
-            self._log(f"Ejecución TM: {estado}")
+            resultado, pasos = tm.run(tm_text, entrada, salida)
+            if resultado == tm.srOKAY:
+                salida("Ejecución detenida: se alcanzó el límite de instrucciones (¿ciclo infinito?)\n")
+            else:
+                salida(f"{tm.stepResultTab[resultado]}\n")
+            salida(f"Number of instructions executed = {pasos}\n")
+            self._log(f"Ejecución TM: {tm.stepResultTab[resultado]}")
         except tm.TMError as ex:
             salida(f"\nError al cargar el código TM: {ex}\n")
             self._log("Ejecución TM: error de carga")

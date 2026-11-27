@@ -11,11 +11,11 @@ Correspondencia árbol TINY -> árbol de este compilador (ParseNode):
   ExpK  OpK      -> nodo operador binario (+ - * / % ^ < <= > >= == != && ||) o unario (!)
   sibling        -> hijos de un nodo "bloque"
 
-Extensiones a la TM de Louden (implementadas en tm.py):
-  DIVF  división real (DIV es entera, truncada como en C)
-  INF   lectura de un valor real (IN lee entero)
-  OUTC  escribe el carácter cuyo código está en el registro (para cadenas y salto de línea)
-  OUT   escribe el número sin salto de línea; cada cout termina con OUTC 10.
+Se usa la TM original sin cambios (sólo enteros, instrucciones de tm.c):
+  - % y ^ no existen en la TM: se generan con DIV/MUL/SUB y con un ciclo.
+  - && se genera con MUL (operandos 0/1); || y ! con saltos.
+  - float no se puede generar (la TM sólo maneja enteros): se reporta como error de generación.
+  - Las cadenas de cout no se pueden imprimir (OUT sólo escribe enteros): quedan como comentario.
 """
 
 from tm_code import CodeEmitter, pc, mp, gp, ac, ac1, ac2
@@ -25,12 +25,17 @@ BINARIOS = set(COMPARACIONES) | {"+", "-", "*", "/", "%", "^", "&&", "||"}
 SENTENCIAS = {"main", "bloque", "decl", "=", "++", "--", "if", "while", "do-while", "do-until", "cin", "cout"}
 
 
+class CodeGenError(Exception):
+    pass
+
+
 class CodeGenerator:
     def __init__(self, symtab, trace_code=True):
         # symtab: {nombre: dirección} tomado de la tabla de símbolos del análisis semántico
         self.symtab = symtab
         self.e = CodeEmitter(trace_code)
         self.tmp_offset = 0
+        self.avisos = []
 
     def st_lookup(self, name):
         return self.symtab[name]
@@ -48,7 +53,10 @@ class CodeGenerator:
                 self.cGen(hijo)
 
         elif n == "decl":
-            pass  # las declaraciones sólo reservan memoria (ya asignada en la tabla de símbolos)
+            if t.attrs.get("dtype") == "float":
+                raise CodeGenError(f"Línea {t.line}: la TM sólo maneja enteros; "
+                                   f"no se puede generar código para variables float")
+            # las declaraciones sólo reservan memoria (ya asignada en la tabla de símbolos)
 
         elif n == "if":
             e.emitComment("-> if")
@@ -118,10 +126,7 @@ class CodeGenerator:
 
         elif n == "cin":
             id_node = t.children[0]
-            if id_node.attrs.get("tipo") == "float":
-                e.emitRO("INF", ac, 0, 0, "read float value")
-            else:
-                e.emitRO("IN", ac, 0, 0, "read integer value")
+            e.emitRO("IN", ac, 0, 0, "read integer value")
             e.emitRM("ST", ac, self.st_lookup(id_node.name), gp, "read: store value")
 
         elif n == "cout":
@@ -130,21 +135,21 @@ class CodeGenerator:
             partes = salida.children if salida.name == "<<" else [salida]
             for parte in partes:
                 if parte.kind == "CADENA":
-                    for ch in parte.name[1:-1]:
-                        e.emitRM("LDC", ac, ord(ch), 0, f"char '{ch}'")
-                        e.emitRO("OUTC", ac, 0, 0, "write char")
+                    e.emitComment(f"write: cadena {parte.name} omitida (OUT sólo escribe enteros)")
+                    self.avisos.append(f"Línea {parte.line}: la cadena {parte.name} no se imprime en la TM")
                 else:
                     self.cGen(parte)
                     e.emitRO("OUT", ac, 0, 0, "write ac")
-            e.emitRM("LDC", ac, 10, 0, "newline")
-            e.emitRO("OUTC", ac, 0, 0, "write newline")
             e.emitComment("<- write")
 
     # ---------------- expresiones ----------------
     def genExp(self, t):
         e = self.e
 
-        if t.kind in ("ENTERO", "REAL") or t.name in ("true", "false"):
+        if t.kind == "REAL":
+            raise CodeGenError(f"Línea {t.line}: la TM sólo maneja enteros; no se puede generar el real {t.name}")
+
+        if t.kind == "ENTERO" or t.name in ("true", "false"):
             e.emitComment("-> Const")
             valor = t.attrs.get("valor", t.name)
             if isinstance(valor, bool):
@@ -179,10 +184,7 @@ class CodeGenerator:
             elif op == "*":
                 e.emitRO("MUL", ac, ac1, ac, "op *")
             elif op == "/":
-                if t.attrs.get("tipo") == "float":
-                    e.emitRO("DIVF", ac, ac1, ac, "op / (real)")
-                else:
-                    e.emitRO("DIV", ac, ac1, ac, "op / (entera)")
+                e.emitRO("DIV", ac, ac1, ac, "op /")
             elif op == "%":
                 # a % b = a - (a / b) * b
                 e.emitRO("DIV", ac2, ac1, ac, "op %: a / b")
@@ -227,7 +229,10 @@ class CodeGenerator:
 
 
 def codeGen(syntax_tree, symtab, codefile, trace_code=True):
-    """Genera el texto del archivo .tm para el árbol anotado (ya validado semánticamente)."""
+    """Genera el texto del archivo .tm para el árbol anotado (ya validado semánticamente).
+
+    Regresa (texto_tm, avisos). Lanza CodeGenError si el programa usa algo que la TM no soporta.
+    """
     g = CodeGenerator(symtab, trace_code)
     e = g.e
     e.emitComment("TINY Compilation to TM Code")
@@ -239,4 +244,4 @@ def codeGen(syntax_tree, symtab, codefile, trace_code=True):
     g.cGen(syntax_tree)
     e.emitComment("End of execution.")
     e.emitRO("HALT", 0, 0, 0, "")
-    return e.text()
+    return e.text(), g.avisos

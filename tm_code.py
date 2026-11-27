@@ -9,7 +9,7 @@ mp = 6   # "memory pointer": apunta al tope de memoria, para temporales
 gp = 5   # "global pointer": base de las variables globales
 ac = 0   # acumulador
 ac1 = 1  # segundo acumulador
-ac2 = 2  # registro auxiliar (sólo para % y ^, que TM no trae como instrucción)
+ac2 = 2  # registro auxiliar (sólo para % y ^, que la TM no trae como instrucción)
 
 
 class CodeEmitter:
@@ -20,11 +20,6 @@ class CodeEmitter:
         self.lines = []                # contenido del archivo .tm, en orden de emisión
         self.emit_loc = 0              # posición TM de la instrucción actual
         self.high_emit_loc = 0         # posición más alta emitida hasta ahora
-
-    def _fmt_num(self, d):
-        if isinstance(d, float):
-            return repr(d)
-        return str(int(d))
 
     def emitComment(self, c):
         if self.trace_code:
@@ -44,7 +39,7 @@ class CodeEmitter:
 
     # instrucción registro-memoria: op r,d(s)
     def emitRM(self, op, r, d, s, c=""):
-        self._emit(self.emit_loc, f"{op:>5}  {r},{self._fmt_num(d)}({s})", c)
+        self._emit(self.emit_loc, f"{op:>5}  {r},{d}({s})", c)
         self.emit_loc += 1
         self.high_emit_loc = max(self.high_emit_loc, self.emit_loc)
 
